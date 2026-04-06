@@ -2,22 +2,27 @@ import { useState } from 'react';
 import { useAppStore } from '../store';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
-import { 
-  FolderPlus, 
-  Plus, 
-  Search, 
-  Folder, 
+import {
+  FolderPlus,
+  Plus,
+  Search,
+  Folder,
   Tag,
   Trash2,
   X,
   PlusCircle,
   Moon,
   Sun,
-  Monitor
+  Monitor,
+  Settings,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 
-export function Sidebar() {
+interface SidebarProps {
+  onOpenSettings: () => void;
+}
+
+export function Sidebar({ onOpenSettings }: SidebarProps) {
   const {
     collections,
     tags,
@@ -205,17 +210,23 @@ export function Sidebar() {
       </div>
 
       {/* Bottom actions */}
-      <div className="p-3 border-t">
-        <div className="flex items-center justify-between">
-          <Button
-            variant="ghost"
-            className="flex-1 justify-start gap-2"
-            onClick={() => setTheme(theme === 'dark' ? 'light' : theme === 'light' ? 'system' : 'dark')}
-          >
-            {theme === 'dark' ? <Moon className="h-4 w-4" /> : theme === 'light' ? <Sun className="h-4 w-4" /> : <Monitor className="h-4 w-4" />}
-            {theme === 'dark' ? 'Dark' : theme === 'light' ? 'Light' : 'System'}
-          </Button>
-        </div>
+      <div className="p-3 border-t space-y-1">
+        <Button
+          variant="ghost"
+          className="w-full justify-start gap-2"
+          onClick={() => setTheme(theme === 'dark' ? 'light' : theme === 'light' ? 'system' : 'dark')}
+        >
+          {theme === 'dark' ? <Moon className="h-4 w-4" /> : theme === 'light' ? <Sun className="h-4 w-4" /> : <Monitor className="h-4 w-4" />}
+          {theme === 'dark' ? 'Dark' : theme === 'light' ? 'Light' : 'System'}
+        </Button>
+        <Button
+          variant="ghost"
+          className="w-full justify-start gap-2"
+          onClick={onOpenSettings}
+        >
+          <Settings className="h-4 w-4" />
+          AI Settings
+        </Button>
       </div>
     </div>
   );

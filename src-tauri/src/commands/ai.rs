@@ -187,6 +187,44 @@ pub async fn run_prompt(state: State<'_, AppState>, request: RunPromptRequest) -
                 duration_ms: Some(duration),
             })
         }
+        "mistral" => {
+            let api_key = Keychain::get_api_key("mistral").map_err(|e| e.to_string())?;
+
+            let body = json!({
+                "model": request.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": request.temperature.unwrap_or(0.7),
+                "max_tokens": request.max_tokens.unwrap_or(4096)
+            });
+
+            let response = client
+                .post("https://api.mistral.ai/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let data: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+
+            let content = data["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+
+            let input_tokens = data["usage"]["prompt_tokens"].as_u64().map(|v| v as u32);
+            let output_tokens = data["usage"]["completion_tokens"].as_u64().map(|v| v as u32);
+            let duration = start.elapsed().as_millis() as u64;
+
+            Ok(ProviderResponse {
+                content,
+                model: request.model,
+                tokens_input: input_tokens,
+                tokens_output: output_tokens,
+                duration_ms: Some(duration),
+            })
+        }
         _ => Err(format!("Unknown provider: {}", request.provider)),
     }
 }
@@ -280,6 +318,12 @@ pub async fn list_models(provider: String) -> Result<Vec<ModelInfo>, String> {
                 ModelInfo { id: "gemini-1.5-flash".to_string(), name: "Gemini 1.5 Flash".to_string(), context_window: Some(1048576) },
             ])
         }
+        "mistral" => Ok(vec![
+            ModelInfo { id: "mistral-large-latest".to_string(), name: "Mistral Large".to_string(), context_window: Some(128000) },
+            ModelInfo { id: "mistral-small-latest".to_string(), name: "Mistral Small".to_string(), context_window: Some(128000) },
+            ModelInfo { id: "open-mistral-nemo".to_string(), name: "Mistral Nemo".to_string(), context_window: Some(128000) },
+            ModelInfo { id: "codestral-latest".to_string(), name: "Codestral".to_string(), context_window: Some(256000) },
+        ]),
         _ => Err(format!("Unknown provider: {}", provider)),
     }
 }
@@ -324,6 +368,12 @@ pub async fn health_check(provider: String) -> Result<HealthStatus, String> {
             match Keychain::get_api_key("gemini") {
                 Ok(_) => Ok(HealthStatus { provider: "gemini".to_string(), available: true, error: None }),
                 Err(_) => Ok(HealthStatus { provider: "gemini".to_string(), available: false, error: Some("API key not configured".to_string()) }),
+            }
+        }
+        "mistral" => {
+            match Keychain::get_api_key("mistral") {
+                Ok(_) => Ok(HealthStatus { provider: "mistral".to_string(), available: true, error: None }),
+                Err(_) => Ok(HealthStatus { provider: "mistral".to_string(), available: false, error: Some("API key not configured".to_string()) }),
             }
         }
         _ => Err(format!("Unknown provider: {}", provider)),

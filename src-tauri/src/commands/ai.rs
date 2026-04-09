@@ -3,10 +3,28 @@ use crate::commands::types::*;
 use crate::keychain::Keychain;
 use tauri::State;
 use reqwest::Client;
+use rusqlite::params;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Instant;
 use log::info;
+
+fn get_ollama_base_url(state: &AppState) -> String {
+    if let Ok(db) = state.db.lock() {
+        let result: Result<String, _> = db.conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params!["ollama_base_url"],
+            |row| row.get(0),
+        );
+        if let Ok(url) = result {
+            let trimmed = url.trim().trim_end_matches('/').to_string();
+            if !trimmed.is_empty() {
+                return trimmed;
+            }
+        }
+    }
+    "http://localhost:11434".to_string()
+}
 
 fn interpolate_variables(prompt: &str, variables: &Option<HashMap<String, String>>) -> String {
     let mut result = prompt.to_string();
@@ -111,6 +129,7 @@ pub async fn run_prompt(state: State<'_, AppState>, request: RunPromptRequest) -
             })
         }
         "ollama" => {
+            let base_url = get_ollama_base_url(&state);
             let body = json!({
                 "model": request.model,
                 "prompt": prompt,
@@ -120,14 +139,14 @@ pub async fn run_prompt(state: State<'_, AppState>, request: RunPromptRequest) -
                     "num_predict": request.max_tokens.unwrap_or(4096)
                 }
             });
-            
+
             let response = client
-                .post("http://localhost:11434/api/generate")
+                .post(format!("{}/api/generate", base_url))
                 .header("Content-Type", "application/json")
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| format!("Cannot reach Ollama at {}. Is it running? ({})", base_url, e))?;
             
             let data: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
             
@@ -248,7 +267,7 @@ pub async fn stream_prompt(state: State<'_, AppState>, request: StreamPromptRequ
 }
 
 #[tauri::command]
-pub async fn list_models(provider: String) -> Result<Vec<ModelInfo>, String> {
+pub async fn list_models(state: State<'_, AppState>, provider: String) -> Result<Vec<ModelInfo>, String> {
     match provider.as_str() {
         "openai" => {
             let api_key = Keychain::get_api_key("openai").map_err(|e| e.to_string())?;
@@ -286,16 +305,20 @@ pub async fn list_models(provider: String) -> Result<Vec<ModelInfo>, String> {
             ])
         }
         "ollama" => {
-            let client = Client::new();
-            
+            let base_url = get_ollama_base_url(&state);
+            let client = Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .map_err(|e| e.to_string())?;
+
             let response = client
-                .get("http://localhost:11434/api/tags")
+                .get(format!("{}/api/tags", base_url))
                 .send()
                 .await
-                .map_err(|e| e.to_string())?;
-            
+                .map_err(|e| format!("Cannot reach Ollama at {}. Is it running? ({})", base_url, e))?;
+
             let data: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-            
+
             let models: Vec<ModelInfo> = data["models"]
                 .as_array()
                 .unwrap_or(&vec![])
@@ -306,7 +329,7 @@ pub async fn list_models(provider: String) -> Result<Vec<ModelInfo>, String> {
                     context_window: None,
                 })
                 .collect();
-            
+
             Ok(models)
         }
         "gemini" => {
@@ -329,7 +352,7 @@ pub async fn list_models(provider: String) -> Result<Vec<ModelInfo>, String> {
 }
 
 #[tauri::command]
-pub async fn health_check(provider: String) -> Result<HealthStatus, String> {
+pub async fn health_check(state: State<'_, AppState>, provider: String) -> Result<HealthStatus, String> {
     match provider.as_str() {
         "openai" => {
             match Keychain::get_api_key("openai") {
@@ -357,11 +380,15 @@ pub async fn health_check(provider: String) -> Result<HealthStatus, String> {
             }
         }
         "ollama" => {
-            let client = Client::new();
-            match client.get("http://localhost:11434/api/tags").send().await {
+            let base_url = get_ollama_base_url(&state);
+            let client = Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_default();
+            match client.get(format!("{}/api/tags", base_url)).send().await {
                 Ok(resp) if resp.status().is_success() => Ok(HealthStatus { provider: "ollama".to_string(), available: true, error: None }),
                 Ok(resp) => Ok(HealthStatus { provider: "ollama".to_string(), available: false, error: Some(resp.status().to_string()) }),
-                Err(e) => Ok(HealthStatus { provider: "ollama".to_string(), available: false, error: Some(e.to_string()) }),
+                Err(_) => Ok(HealthStatus { provider: "ollama".to_string(), available: false, error: Some(format!("Cannot reach Ollama at {}. Is it running?", base_url)) }),
             }
         }
         "gemini" => {

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAppStore } from './store';
 import { Sidebar } from './components/Sidebar';
 import { SettingsModal } from './components/SettingsModal';
@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Plus, Pin, Copy, Files, Trash2, Play, Search, X, Loader2 } from 'lucide-react';
 import { cn, formatDate, truncate } from './lib/utils';
 import { aiApi } from './lib/tauri';
+import { MarkdownRenderer } from './components/MarkdownRenderer';
 
 const PROVIDERS = [
   { id: 'ollama', label: 'Ollama' },
@@ -62,11 +63,52 @@ export default function App() {
   const [selectedModel, setSelectedModel] = useState('llama3');
   const [availableModels, setAvailableModels] = useState<{ id: string; name: string }[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelFetchError, setModelFetchError] = useState<string | null>(null);
+  const [modelRetryTick, setModelRetryTick] = useState(0);
 
   // UI state
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [commandSearch, setCommandSearch] = useState('');
+
+  // Layout resize state
+  const [sidebarWidth, setSidebarWidth] = useState(256);
+  const [promptListWidth, setPromptListWidth] = useState(288);
+  const [aiPanelHeight, setAiPanelHeight] = useState(220);
+
+  const sidebarWidthRef = useRef(sidebarWidth);
+  const promptListWidthRef = useRef(promptListWidth);
+  const aiPanelHeightRef = useRef(aiPanelHeight);
+  sidebarWidthRef.current = sidebarWidth;
+  promptListWidthRef.current = promptListWidth;
+  aiPanelHeightRef.current = aiPanelHeight;
+
+  const startResize = useCallback((
+    getRef: () => number,
+    setter: (n: number) => void,
+    direction: 'h' | 'v',
+    min: number,
+    max: number,
+    invert = false
+  ) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startPos = direction === 'h' ? e.clientX : e.clientY;
+    const startSize = getRef();
+    const onMove = (ev: MouseEvent) => {
+      const delta = (direction === 'h' ? ev.clientX : ev.clientY) - startPos;
+      setter(Math.max(min, Math.min(max, startSize + (invert ? -delta : delta))));
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.removeProperty('cursor');
+      document.body.style.removeProperty('user-select');
+    };
+    document.body.style.cursor = direction === 'h' ? 'col-resize' : 'row-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, []);
 
   useEffect(() => {
     loadPrompts();
@@ -75,29 +117,38 @@ export default function App() {
     loadSettings();
   }, [loadPrompts, loadCollections, loadTags, loadSettings]);
 
-  // Load models whenever provider changes
+  // Load models whenever provider changes or retry is triggered
   useEffect(() => {
     let cancelled = false;
     const fetchModels = async () => {
       setModelsLoading(true);
       setAvailableModels([]);
+      setModelFetchError(null);
       try {
         const models = await aiApi.listModels(selectedProvider);
-        if (!cancelled && models.length > 0) {
-          setAvailableModels(models);
-          // Keep existing model if it's in the list, otherwise pick first
-          setSelectedModel(prev =>
-            models.find(m => m.id === prev) ? prev : models[0].id
-          );
+        if (!cancelled) {
+          if (models.length > 0) {
+            setAvailableModels(models);
+            setSelectedModel(prev =>
+              models.find(m => m.id === prev) ? prev : models[0].id
+            );
+          } else if (selectedProvider === 'ollama') {
+            setModelFetchError('Ollama connected but no models installed. Run: ollama pull llama3');
+          }
         }
-      } catch {
-        // If fetch fails, fall back to default model text input
+      } catch (e) {
+        if (!cancelled) {
+          if (selectedProvider === 'ollama') {
+            setModelFetchError(String(e).replace(/^Error: /, ''));
+          }
+          // For other providers without a list API, just keep the text input
+        }
       }
       if (!cancelled) setModelsLoading(false);
     };
     fetchModels();
     return () => { cancelled = true; };
-  }, [selectedProvider]);
+  }, [selectedProvider, modelRetryTick]);
 
   // Keyboard shortcut for command palette
   useEffect(() => {
@@ -167,6 +218,7 @@ export default function App() {
     setSelectedProvider(provider);
     setSelectedModel(DEFAULT_MODELS[provider] ?? '');
     setAiResponse('');
+    setModelFetchError(null);
   };
 
   // Command palette
@@ -207,7 +259,12 @@ export default function App() {
 
   return (
     <div className="flex h-screen bg-background">
-      <Sidebar onOpenSettings={() => setIsSettingsOpen(true)} />
+      <Sidebar onOpenSettings={() => setIsSettingsOpen(true)} width={sidebarWidth} />
+      {/* Sidebar resize handle */}
+      <div
+        className="w-1 h-full cursor-col-resize flex-shrink-0 hover:bg-primary/40 active:bg-primary/60 transition-colors"
+        onMouseDown={startResize(() => sidebarWidthRef.current, setSidebarWidth, 'h', 160, 400)}
+      />
 
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Error banner */}
@@ -241,7 +298,10 @@ export default function App() {
 
         <div className="flex-1 flex overflow-hidden">
           {/* Prompt list */}
-          <div className="w-72 border-r overflow-y-auto flex-shrink-0">
+          <div
+            className="border-r overflow-y-auto flex-shrink-0"
+            style={{ width: promptListWidth, minWidth: promptListWidth, maxWidth: promptListWidth }}
+          >
             {isLoading ? (
               <div className="p-4 text-center text-muted-foreground">Loading...</div>
             ) : filteredPrompts.length === 0 ? (
@@ -280,6 +340,12 @@ export default function App() {
               </div>
             )}
           </div>
+
+          {/* Prompt list resize handle */}
+          <div
+            className="w-1 h-full cursor-col-resize flex-shrink-0 hover:bg-primary/40 active:bg-primary/60 transition-colors"
+            onMouseDown={startResize(() => promptListWidthRef.current, setPromptListWidth, 'h', 160, 600)}
+          />
 
           {/* Main editor panel */}
           <div className="flex-1 flex flex-col overflow-hidden">
@@ -362,9 +428,19 @@ export default function App() {
                   )}
                 </div>
 
-                {/* AI Runner panel */}
-                <div className="border-t flex-shrink-0">
-                  <div className="px-4 py-3 flex items-center gap-2 flex-wrap">
+                {/* AI Runner panel — resizable via top drag handle */}
+                <div
+                  className="border-t flex-shrink-0 flex flex-col"
+                  style={{ height: aiPanelHeight, minHeight: aiPanelHeight, maxHeight: aiPanelHeight }}
+                >
+                  {/* Vertical resize handle */}
+                  <div
+                    className="h-1 w-full cursor-row-resize flex-shrink-0 hover:bg-primary/40 active:bg-primary/60 transition-colors"
+                    onMouseDown={startResize(() => aiPanelHeightRef.current, setAiPanelHeight, 'v', 52, 600, true)}
+                  />
+
+                  {/* Controls row */}
+                  <div className="px-4 py-2 flex items-center gap-2 flex-wrap flex-shrink-0">
                     {/* Provider select */}
                     <Select value={selectedProvider} onValueChange={handleProviderChange}>
                       <SelectTrigger className="h-8 w-36 text-xs">
@@ -382,6 +458,20 @@ export default function App() {
                       <div className="h-8 w-44 flex items-center px-3 rounded-md border border-input bg-background">
                         <Loader2 className="h-3 w-3 animate-spin text-muted-foreground mr-2" />
                         <span className="text-xs text-muted-foreground">Loading models…</span>
+                      </div>
+                    ) : modelFetchError ? (
+                      <div className="flex items-center gap-1">
+                        <div className="h-8 w-44 flex items-center px-2 rounded-md border border-destructive/50 bg-destructive/5" title={modelFetchError}>
+                          <span className="text-xs text-destructive truncate">{modelFetchError.length > 28 ? 'Ollama not reachable' : modelFetchError}</span>
+                        </div>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-8 px-2 text-xs"
+                          onClick={() => setModelRetryTick(t => t + 1)}
+                        >
+                          Retry
+                        </Button>
                       </div>
                     ) : availableModels.length > 0 ? (
                       <Select value={selectedModel} onValueChange={setSelectedModel}>
@@ -413,16 +503,21 @@ export default function App() {
 
                     <button
                       onClick={() => setIsSettingsOpen(true)}
-                      className="text-xs text-muted-foreground hover:text-foreground ml-auto"
+                      className={cn(
+                        "text-xs hover:text-foreground ml-auto",
+                        modelFetchError && selectedProvider === 'ollama'
+                          ? "text-destructive font-medium"
+                          : "text-muted-foreground"
+                      )}
                     >
-                      Configure keys →
+                      {modelFetchError && selectedProvider === 'ollama' ? 'Fix Ollama URL →' : 'Configure keys →'}
                     </button>
                   </div>
 
                   {/* AI response */}
                   {aiResponse && (
-                    <div className="mx-4 mb-4 rounded-md border border-border bg-muted/30 p-3 max-h-64 overflow-y-auto">
-                      <div className="flex items-center justify-between mb-2">
+                    <div className="mx-4 mb-3 flex-1 rounded-md border border-border bg-muted/30 p-3 overflow-y-auto min-h-0">
+                      <div className="flex items-center justify-between mb-2 flex-shrink-0">
                         <span className="text-xs font-medium text-muted-foreground">
                           {selectedProvider} · {selectedModel}
                         </span>
@@ -433,7 +528,14 @@ export default function App() {
                           <Copy className="h-3 w-3" /> Copy
                         </button>
                       </div>
-                      <pre className="whitespace-pre-wrap text-sm">{aiResponse}</pre>
+                      <MarkdownRenderer content={aiResponse} />
+                    </div>
+                  )}
+
+                  {isRunningAI && !aiResponse && (
+                    <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Generating…
                     </div>
                   )}
                 </div>

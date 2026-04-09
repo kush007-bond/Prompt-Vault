@@ -3,7 +3,7 @@ import { Eye, EyeOff, CheckCircle2, XCircle, Loader2, Wifi } from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
-import { aiApi } from '../lib/tauri';
+import { aiApi, settingsApi } from '../lib/tauri';
 
 interface ProviderConfig {
   id: string;
@@ -43,11 +43,15 @@ export function SettingsModal({ open, onClose }: Props) {
       PROVIDERS.map(p => [p.id, { status: 'idle', apiKey: '', showKey: false, saving: false, saved: false }])
     )
   );
+  const [ollamaUrl, setOllamaUrl] = useState('');
+  const [ollamaUrlSaved, setOllamaUrlSaved] = useState(false);
 
   useEffect(() => {
     if (!open) return;
-    // Check all providers on open
     PROVIDERS.forEach(p => checkProvider(p.id));
+    settingsApi.get('ollama_base_url').then(val => {
+      setOllamaUrl(val ?? '');
+    }).catch(() => {});
   }, [open]);
 
   const checkProvider = async (id: string) => {
@@ -84,6 +88,17 @@ export function SettingsModal({ open, onClose }: Props) {
     } catch (e) {
       setProviders(prev => ({ ...prev, [id]: { ...prev[id], saving: false } }));
     }
+  };
+
+  const saveOllamaUrl = async () => {
+    const url = ollamaUrl.trim() || 'http://localhost:11434';
+    await settingsApi.set('ollama_base_url', url).catch(() => {});
+    setOllamaUrl(url);
+    setOllamaUrlSaved(true);
+    setTimeout(() => {
+      setOllamaUrlSaved(false);
+      checkProvider('ollama');
+    }, 1500);
   };
 
   const toggleShowKey = (id: string) => {
@@ -132,11 +147,28 @@ export function SettingsModal({ open, onClose }: Props) {
                   <p className="text-xs text-destructive">{state.error}</p>
                 )}
 
-                {/* Ollama note */}
-                {provider.id === 'ollama' && state.status !== 'ok' && (
-                  <p className="text-xs text-muted-foreground">
-                    Make sure Ollama is running on <code className="bg-muted px-1 rounded">localhost:11434</code>
-                  </p>
+                {/* Ollama URL config */}
+                {provider.id === 'ollama' && (
+                  <div className="space-y-1.5">
+                    <p className="text-xs text-muted-foreground">Server URL (default: http://localhost:11434)</p>
+                    <div className="flex gap-2">
+                      <Input
+                        placeholder="http://localhost:11434"
+                        value={ollamaUrl}
+                        onChange={e => setOllamaUrl(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && saveOllamaUrl()}
+                        className="h-8 text-xs font-mono"
+                      />
+                      <Button size="sm" className="h-8 px-3 text-xs" onClick={saveOllamaUrl}>
+                        {ollamaUrlSaved ? 'Saved!' : 'Save'}
+                      </Button>
+                    </div>
+                    {state.status !== 'ok' && (
+                      <p className="text-xs text-muted-foreground">
+                        Make sure Ollama is running. On Windows, try <code className="bg-muted px-1 rounded">http://127.0.0.1:11434</code> if localhost doesn't work.
+                      </p>
+                    )}
+                  </div>
                 )}
 
                 {/* API key input for providers that need it */}

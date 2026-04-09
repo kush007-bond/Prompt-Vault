@@ -20,9 +20,10 @@ import { cn } from '../lib/utils';
 
 interface SidebarProps {
   onOpenSettings: () => void;
+  width?: number;
 }
 
-export function Sidebar({ onOpenSettings }: SidebarProps) {
+export function Sidebar({ onOpenSettings, width = 256 }: SidebarProps) {
   const {
     collections,
     tags,
@@ -60,7 +61,7 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
   };
 
   return (
-    <div className="w-64 h-full border-r bg-card flex flex-col">
+    <div className="h-full border-r bg-card flex flex-col overflow-hidden" style={{ width, minWidth: width, maxWidth: width }}>
       {/* Search */}
       <div className="p-3 border-b">
         <div className="relative">

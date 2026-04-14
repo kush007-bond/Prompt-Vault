@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, Channel } from '@tauri-apps/api/core';
 
 // Types
 export interface Prompt {
@@ -47,6 +47,15 @@ export interface Setting {
   value: string;
 }
 
+export interface Attachment {
+  /** File name, e.g. "report.txt" or "photo.png" */
+  name: string;
+  /** Plain text for text files; raw base64 (no data-URL prefix) for images */
+  content: string;
+  /** MIME type, e.g. "text/plain" or "image/jpeg" */
+  mime_type: string;
+}
+
 export interface RunPromptRequest {
   provider: string;
   model: string;
@@ -55,6 +64,7 @@ export interface RunPromptRequest {
   temperature?: number;
   max_tokens?: number;
   system_prompt?: string;
+  attachments?: Attachment[];
 }
 
 export interface ProviderResponse {
@@ -70,6 +80,24 @@ export interface ModelInfo {
   name: string;
   context_window: number | null;
 }
+
+export interface Message {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+export interface RunConversationRequest {
+  provider: string;
+  model: string;
+  messages: Message[];
+  temperature?: number;
+  max_tokens?: number;
+}
+
+export type StreamEvent =
+  | { event: 'token'; data: string }
+  | { event: 'done' }
+  | { event: 'error'; data: string };
 
 export interface ApiKeyStatus {
   provider: string;
@@ -179,7 +207,10 @@ export const settingsApi = {
 // AI API
 export const aiApi = {
   runPrompt: (request: RunPromptRequest) => invoke<ProviderResponse>('run_prompt', { request }),
-  streamPrompt: (request: RunPromptRequest) => invoke<string>('stream_prompt', { request }),
+  streamPromptWithChannel: (request: RunPromptRequest, channel: Channel<StreamEvent>) =>
+    invoke<void>('run_prompt_streaming', { channel, request }),
+  runConversation: (request: RunConversationRequest) =>
+    invoke<ProviderResponse>('run_conversation', { request }),
   listModels: (provider: string) => invoke<ModelInfo[]>('list_models', { provider }),
   healthCheck: (provider: string) => invoke<HealthStatus>('health_check', { provider }),
   storeApiKey: (provider: string, apiKey: string) => invoke<void>('store_api_key', { provider, apiKey }),

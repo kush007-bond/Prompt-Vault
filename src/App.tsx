@@ -1,14 +1,17 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { Channel } from '@tauri-apps/api/core';
 import { useAppStore } from './store';
 import { Sidebar } from './components/Sidebar';
 import { SettingsModal } from './components/SettingsModal';
+import { ConversationPanel } from './components/ConversationPanel';
+import { ABTestPanel } from './components/ABTestPanel';
 import { Button } from './components/ui/button';
 import { Input } from './components/ui/input';
 import { Textarea } from './components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './components/ui/select';
-import { Plus, Pin, Copy, Files, Trash2, Play, Search, X, Loader2 } from 'lucide-react';
+import { Plus, Pin, Copy, Files, Trash2, Play, Search, X, Loader2, Paperclip, AlertTriangle, FileText, Image, MessageSquare, SplitSquareHorizontal } from 'lucide-react';
 import { cn, formatDate, truncate } from './lib/utils';
-import { aiApi } from './lib/tauri';
+import { aiApi, exportApi, type Attachment, type StreamEvent } from './lib/tauri';
 import { MarkdownRenderer } from './components/MarkdownRenderer';
 
 const PROVIDERS = [
@@ -56,6 +59,10 @@ export default function App() {
   const [newTitle, setNewTitle] = useState('');
   const [newBody, setNewBody] = useState('');
 
+  // AI panel mode: run | chat | ab
+  type AiMode = 'run' | 'chat' | 'ab';
+  const [aiMode, setAiMode] = useState<AiMode>('run');
+
   // AI state
   const [aiResponse, setAiResponse] = useState('');
   const [isRunningAI, setIsRunningAI] = useState(false);
@@ -65,6 +72,19 @@ export default function App() {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelFetchError, setModelFetchError] = useState<string | null>(null);
   const [modelRetryTick, setModelRetryTick] = useState(0);
+
+  // File attachments
+  interface AttachedFile {
+    id: string;
+    name: string;
+    content: string;    // plain text OR raw base64 (no data-URL prefix) for images
+    mimeType: string;
+    isImage: boolean;
+    previewUrl?: string;
+    sizeLabel: string;
+  }
+  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // UI state
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -178,16 +198,19 @@ export default function App() {
 
   const handleCreate = async () => {
     if (newTitle.trim()) {
-      await createPrompt(newTitle.trim(), newBody.trim(), selectedCollectionId || undefined);
+      const prompt = await createPrompt(newTitle.trim(), newBody.trim(), selectedCollectionId || undefined);
       setNewTitle('');
       setNewBody('');
       setIsCreating(false);
+      setSelectedPrompt(prompt.id);
+      setEditTitle(prompt.title);
+      setEditBody(prompt.body);
     }
   };
 
   const handleSaveEdit = async () => {
     if (selectedPrompt) {
-      await updatePrompt(selectedPrompt.id, editTitle, editBody);
+      await updatePrompt(selectedPrompt.id, editTitle, editBody, selectedPrompt.collection_id || undefined);
       setIsEditing(false);
     }
   };
@@ -197,17 +220,81 @@ export default function App() {
     if (!promptText) return;
     setIsRunningAI(true);
     setAiResponse('');
+
+    const attachments: Attachment[] = attachedFiles.map(f => ({
+      name: f.name,
+      content: f.content,
+      mime_type: f.mimeType,
+    }));
+
+    const channel = new Channel<StreamEvent>();
+    channel.onmessage = (event) => {
+      if (event.event === 'token') {
+        setAiResponse(prev => prev + event.data);
+      } else if (event.event === 'done') {
+        setIsRunningAI(false);
+      } else if (event.event === 'error') {
+        setAiResponse(prev => prev || ('Error: ' + event.data));
+        setIsRunningAI(false);
+      }
+    };
+
     try {
-      const response = await aiApi.runPrompt({
-        provider: selectedProvider,
-        model: selectedModel,
-        prompt: promptText,
-      });
-      setAiResponse(response.content);
+      await aiApi.streamPromptWithChannel(
+        {
+          provider: selectedProvider,
+          model: selectedModel,
+          prompt: promptText,
+          attachments: attachments.length ? attachments : undefined,
+        },
+        channel,
+      );
     } catch (e) {
-      setAiResponse('Error: ' + String(e));
+      setAiResponse(prev => prev || ('Error: ' + String(e)));
+      setIsRunningAI(false);
     }
-    setIsRunningAI(false);
+  };
+
+  // ── Import / Export ────────────────────────────────────────────────────────
+  const handleExport = async () => {
+    try {
+      const json = await exportApi.toJson();
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `promptvault-export-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError('Export failed: ' + String(e));
+    }
+  };
+
+  const importFileRef = useRef<HTMLInputElement>(null);
+  const handleImport = () => importFileRef.current?.click();
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    try {
+      const text = await file.text();
+      const result = await exportApi.fromJson({ json_content: text });
+      if (result.success) {
+        await loadPrompts();
+        await loadCollections();
+        await loadTags();
+        setError(null);
+        // Brief success toast via error slot (green)
+        setError(`Imported ${result.prompts_imported} prompts, ${result.collections_imported} collections, ${result.tags_imported} tags.`);
+        setTimeout(() => setError(null), 4000);
+      } else {
+        setError('Import failed: ' + result.message);
+      }
+    } catch (err) {
+      setError('Import failed: ' + String(err));
+    }
   };
 
   const handleCopy = async (text: string) => {
@@ -219,6 +306,50 @@ export default function App() {
     setSelectedModel(DEFAULT_MODELS[provider] ?? '');
     setAiResponse('');
     setModelFetchError(null);
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    if (!files.length) return;
+    files.forEach(file => {
+      const isImage = file.type.startsWith('image/');
+      const sizeLabel = file.size < 1024
+        ? `${file.size} B`
+        : file.size < 1024 * 1024
+          ? `${(file.size / 1024).toFixed(1)} KB`
+          : `${(file.size / (1024 * 1024)).toFixed(1)} MB`;
+      const id = `${file.name}-${Date.now()}-${Math.random()}`;
+
+      if (isImage) {
+        const reader = new FileReader();
+        reader.onload = ev => {
+          const dataUrl = ev.target?.result as string;
+          // strip "data:<mime>;base64," prefix to get raw base64
+          const base64 = dataUrl.split(',')[1] ?? '';
+          setAttachedFiles(prev => [...prev, {
+            id, name: file.name, content: base64, mimeType: file.type,
+            isImage: true, previewUrl: dataUrl, sizeLabel,
+          }]);
+        };
+        reader.readAsDataURL(file);
+      } else {
+        const reader = new FileReader();
+        reader.onload = ev => {
+          const text = ev.target?.result as string;
+          setAttachedFiles(prev => [...prev, {
+            id, name: file.name, content: text, mimeType: file.type || 'text/plain',
+            isImage: false, sizeLabel,
+          }]);
+        };
+        reader.readAsText(file);
+      }
+    });
+    // reset so same file can be re-added
+    e.target.value = '';
+  };
+
+  const removeAttachment = (id: string) => {
+    setAttachedFiles(prev => prev.filter(f => f.id !== id));
   };
 
   // Command palette
@@ -259,7 +390,12 @@ export default function App() {
 
   return (
     <div className="flex h-screen bg-background">
-      <Sidebar onOpenSettings={() => setIsSettingsOpen(true)} width={sidebarWidth} />
+      <Sidebar
+        onOpenSettings={() => setIsSettingsOpen(true)}
+        onExport={handleExport}
+        onImport={handleImport}
+        width={sidebarWidth}
+      />
       {/* Sidebar resize handle */}
       <div
         className="w-1 h-full cursor-col-resize flex-shrink-0 hover:bg-primary/40 active:bg-primary/60 transition-colors"
@@ -439,103 +575,226 @@ export default function App() {
                     onMouseDown={startResize(() => aiPanelHeightRef.current, setAiPanelHeight, 'v', 52, 600, true)}
                   />
 
-                  {/* Controls row */}
-                  <div className="px-4 py-2 flex items-center gap-2 flex-wrap flex-shrink-0">
-                    {/* Provider select */}
-                    <Select value={selectedProvider} onValueChange={handleProviderChange}>
-                      <SelectTrigger className="h-8 w-36 text-xs">
-                        <SelectValue placeholder="Provider" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {PROVIDERS.map(p => (
-                          <SelectItem key={p.id} value={p.id}>{p.label}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-
-                    {/* Model select */}
-                    {modelsLoading ? (
-                      <div className="h-8 w-44 flex items-center px-3 rounded-md border border-input bg-background">
-                        <Loader2 className="h-3 w-3 animate-spin text-muted-foreground mr-2" />
-                        <span className="text-xs text-muted-foreground">Loading models…</span>
-                      </div>
-                    ) : modelFetchError ? (
-                      <div className="flex items-center gap-1">
-                        <div className="h-8 w-44 flex items-center px-2 rounded-md border border-destructive/50 bg-destructive/5" title={modelFetchError}>
-                          <span className="text-xs text-destructive truncate">{modelFetchError.length > 28 ? 'Ollama not reachable' : modelFetchError}</span>
-                        </div>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-8 px-2 text-xs"
-                          onClick={() => setModelRetryTick(t => t + 1)}
-                        >
-                          Retry
-                        </Button>
-                      </div>
-                    ) : availableModels.length > 0 ? (
-                      <Select value={selectedModel} onValueChange={setSelectedModel}>
-                        <SelectTrigger className="h-8 w-44 text-xs">
-                          <SelectValue placeholder="Select model" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {availableModels.map(m => (
-                            <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    ) : (
-                      <Input
-                        value={selectedModel}
-                        onChange={e => setSelectedModel(e.target.value)}
-                        placeholder="Model name"
-                        className="h-8 w-44 text-xs"
-                      />
-                    )}
-
-                    <Button size="sm" className="h-8" onClick={handleRunAI} disabled={isRunningAI}>
-                      {isRunningAI ? (
-                        <><Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />Running…</>
-                      ) : (
-                        <><Play className="h-3.5 w-3.5 mr-2" />Run</>
-                      )}
-                    </Button>
-
-                    <button
-                      onClick={() => setIsSettingsOpen(true)}
-                      className={cn(
-                        "text-xs hover:text-foreground ml-auto",
-                        modelFetchError && selectedProvider === 'ollama'
-                          ? "text-destructive font-medium"
-                          : "text-muted-foreground"
-                      )}
-                    >
-                      {modelFetchError && selectedProvider === 'ollama' ? 'Fix Ollama URL →' : 'Configure keys →'}
-                    </button>
+                  {/* Mode tabs */}
+                  <div className="px-4 pt-1.5 pb-0 flex items-center gap-1 flex-shrink-0 border-b">
+                    {(
+                      [
+                        { id: 'run' as const, label: 'Run', icon: <Play className="h-3 w-3" /> },
+                        { id: 'chat' as const, label: 'Chat', icon: <MessageSquare className="h-3 w-3" /> },
+                        { id: 'ab' as const, label: 'A/B Test', icon: <SplitSquareHorizontal className="h-3 w-3" /> },
+                      ] as const
+                    ).map(tab => (
+                      <button
+                        key={tab.id}
+                        onClick={() => setAiMode(tab.id)}
+                        className={cn(
+                          "flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-t-md transition-colors -mb-px border-b-2",
+                          aiMode === tab.id
+                            ? "border-primary text-primary font-medium bg-primary/5"
+                            : "border-transparent text-muted-foreground hover:text-foreground"
+                        )}
+                      >
+                        {tab.icon}{tab.label}
+                      </button>
+                    ))}
                   </div>
 
-                  {/* AI response */}
-                  {aiResponse && (
-                    <div className="mx-4 mb-3 flex-1 rounded-md border border-border bg-muted/30 p-3 overflow-y-auto min-h-0">
-                      <div className="flex items-center justify-between mb-2 flex-shrink-0">
-                        <span className="text-xs font-medium text-muted-foreground">
-                          {selectedProvider} · {selectedModel}
-                        </span>
+                  {/* ── Run mode ── */}
+                  {aiMode === 'run' && (
+                    <>
+                      {/* Controls row */}
+                      <div className="px-4 py-2 flex items-center gap-2 flex-wrap flex-shrink-0">
+                        <Select value={selectedProvider} onValueChange={handleProviderChange}>
+                          <SelectTrigger className="h-8 w-36 text-xs">
+                            <SelectValue placeholder="Provider" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {PROVIDERS.map(p => (
+                              <SelectItem key={p.id} value={p.id}>{p.label}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+
+                        {modelsLoading ? (
+                          <div className="h-8 w-44 flex items-center px-3 rounded-md border border-input bg-background">
+                            <Loader2 className="h-3 w-3 animate-spin text-muted-foreground mr-2" />
+                            <span className="text-xs text-muted-foreground">Loading models…</span>
+                          </div>
+                        ) : modelFetchError ? (
+                          <div className="flex items-center gap-1">
+                            <div className="h-8 w-44 flex items-center px-2 rounded-md border border-destructive/50 bg-destructive/5" title={modelFetchError}>
+                              <span className="text-xs text-destructive truncate">{modelFetchError.length > 28 ? 'Ollama not reachable' : modelFetchError}</span>
+                            </div>
+                            <Button variant="outline" size="sm" className="h-8 px-2 text-xs" onClick={() => setModelRetryTick(t => t + 1)}>
+                              Retry
+                            </Button>
+                          </div>
+                        ) : availableModels.length > 0 ? (
+                          <Select value={selectedModel} onValueChange={setSelectedModel}>
+                            <SelectTrigger className="h-8 w-44 text-xs">
+                              <SelectValue placeholder="Select model" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {availableModels.map(m => (
+                                <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          <Input
+                            value={selectedModel}
+                            onChange={e => setSelectedModel(e.target.value)}
+                            placeholder="Model name"
+                            className="h-8 w-44 text-xs"
+                          />
+                        )}
+
+                        <Button size="sm" className="h-8" onClick={handleRunAI} disabled={isRunningAI}>
+                          {isRunningAI
+                            ? <><Loader2 className="h-3.5 w-3.5 mr-2 animate-spin" />Running…</>
+                            : <><Play className="h-3.5 w-3.5 mr-2" />Run</>
+                          }
+                        </Button>
+
+                        <Button variant="outline" size="sm" className="h-8 px-2" title="Attach file" onClick={() => fileInputRef.current?.click()}>
+                          <Paperclip className="h-3.5 w-3.5" />
+                        </Button>
+
                         <button
-                          onClick={() => handleCopy(aiResponse)}
-                          className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+                          onClick={() => setIsSettingsOpen(true)}
+                          className={cn(
+                            "text-xs hover:text-foreground ml-auto",
+                            modelFetchError && selectedProvider === 'ollama'
+                              ? "text-destructive font-medium"
+                              : "text-muted-foreground"
+                          )}
                         >
-                          <Copy className="h-3 w-3" /> Copy
+                          {modelFetchError && selectedProvider === 'ollama' ? 'Fix Ollama URL →' : 'Configure keys →'}
                         </button>
                       </div>
-                      <MarkdownRenderer content={aiResponse} />
+
+                      {/* Attached files chips */}
+                      {attachedFiles.length > 0 && (
+                        <div className="px-4 pb-1 flex flex-wrap gap-1.5">
+                          {attachedFiles.map(file => (
+                            <span
+                              key={file.id}
+                              className={cn(
+                                "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border",
+                                file.isImage
+                                  ? "bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400"
+                                  : "bg-muted border-border text-muted-foreground"
+                              )}
+                            >
+                              {file.isImage ? <Image className="h-3 w-3 shrink-0" /> : <FileText className="h-3 w-3 shrink-0" />}
+                              <span className="max-w-[120px] truncate">{file.name}</span>
+                              <span className="opacity-60">({file.sizeLabel})</span>
+                              <button onClick={() => removeAttachment(file.id)} className="ml-0.5 hover:text-destructive" title="Remove">
+                                <X className="h-3 w-3" />
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Image warning */}
+                      {attachedFiles.some(f => f.isImage) && (
+                        <div className="mx-4 mb-1 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+                          <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                          <span>
+                            Image attached — make sure you're using a <strong>vision-capable model</strong>{' '}
+                            (e.g. <em>gpt-4o</em>, <em>claude-3</em>, <em>gemini-2.0-flash</em>, or <em>llava</em> for Ollama).
+                            Mistral does not support images.
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Streaming response */}
+                      {aiResponse && (
+                        <div className="mx-4 mb-3 flex-1 rounded-md border border-border bg-muted/30 p-3 overflow-y-auto min-h-0">
+                          <div className="flex items-center justify-between mb-2 flex-shrink-0">
+                            <span className="text-xs font-medium text-muted-foreground">
+                              {selectedProvider} · {selectedModel}
+                              {isRunningAI && <span className="ml-2 animate-pulse text-primary">●</span>}
+                            </span>
+                            <button
+                              onClick={() => handleCopy(aiResponse)}
+                              className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+                            >
+                              <Copy className="h-3 w-3" /> Copy
+                            </button>
+                          </div>
+                          <MarkdownRenderer content={aiResponse} />
+                        </div>
+                      )}
+
+                      {isRunningAI && !aiResponse && (
+                        <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm gap-2">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Generating…
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {/* ── Chat mode ── */}
+                  {aiMode === 'chat' && (
+                    <div className="flex-1 overflow-hidden flex flex-col min-h-0">
+                      {/* Provider/model row for chat */}
+                      <div className="px-4 py-2 flex items-center gap-2 flex-wrap flex-shrink-0 border-b bg-muted/20">
+                        <Select value={selectedProvider} onValueChange={handleProviderChange}>
+                          <SelectTrigger className="h-8 w-36 text-xs">
+                            <SelectValue placeholder="Provider" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {PROVIDERS.map(p => (
+                              <SelectItem key={p.id} value={p.id}>{p.label}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+
+                        {availableModels.length > 0 ? (
+                          <Select value={selectedModel} onValueChange={setSelectedModel}>
+                            <SelectTrigger className="h-8 w-44 text-xs">
+                              <SelectValue placeholder="Select model" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {availableModels.map(m => (
+                                <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          <Input
+                            value={selectedModel}
+                            onChange={e => setSelectedModel(e.target.value)}
+                            placeholder="Model name"
+                            className="h-8 w-44 text-xs"
+                          />
+                        )}
+
+                        <button
+                          onClick={() => setIsSettingsOpen(true)}
+                          className="text-xs text-muted-foreground hover:text-foreground ml-auto"
+                        >
+                          Configure keys →
+                        </button>
+                      </div>
+                      <ConversationPanel
+                        systemPrompt={isEditing ? editBody : (selectedPrompt?.body ?? '')}
+                        provider={selectedProvider}
+                        model={selectedModel}
+                      />
                     </div>
                   )}
 
-                  {isRunningAI && !aiResponse && (
-                    <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm gap-2">
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      Generating…
+                  {/* ── A/B Test mode ── */}
+                  {aiMode === 'ab' && (
+                    <div className="flex-1 overflow-hidden min-h-0">
+                      <ABTestPanel
+                        promptText={isEditing ? editBody : (selectedPrompt?.body ?? '')}
+                        onOpenSettings={() => setIsSettingsOpen(true)}
+                      />
                     </div>
                   )}
                 </div>
@@ -548,6 +807,24 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {/* Hidden file input for attachments */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={handleFileSelect}
+      />
+
+      {/* Hidden file input for import */}
+      <input
+        ref={importFileRef}
+        type="file"
+        accept=".json,application/json"
+        className="hidden"
+        onChange={handleImportFile}
+      />
 
       {/* Settings modal */}
       <SettingsModal open={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />

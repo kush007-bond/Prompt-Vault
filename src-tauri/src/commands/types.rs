@@ -132,6 +132,16 @@ pub struct SetSettingRequest {
 // ==================== AI Types ====================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    /// File name (e.g. "report.txt", "photo.png")
+    pub name: String,
+    /// Plain UTF-8 text for text files; raw base64 (no data-URL prefix) for images
+    pub content: String,
+    /// MIME type, e.g. "text/plain", "image/jpeg"
+    pub mime_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunPromptRequest {
     pub provider: String,
     pub model: String,
@@ -140,6 +150,7 @@ pub struct RunPromptRequest {
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
     pub system_prompt: Option<String>,
+    pub attachments: Option<Vec<Attachment>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +162,7 @@ pub struct StreamPromptRequest {
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
     pub system_prompt: Option<String>,
+    pub attachments: Option<Vec<Attachment>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +193,35 @@ pub struct ApiKeyStatus {
     pub provider: String,
     pub configured: bool,
     pub has_key: bool,
+}
+
+// ==================== Conversation Types ====================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunConversationRequest {
+    pub provider: String,
+    pub model: String,
+    pub messages: Vec<Message>,
+    pub temperature: Option<f32>,
+    pub max_tokens: Option<u32>,
+}
+
+/// Streamed over a Tauri Channel for real-time AI output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event", content = "data")]
+pub enum StreamEvent {
+    #[serde(rename = "token")]
+    Token(String),
+    #[serde(rename = "done")]
+    Done,
+    #[serde(rename = "error")]
+    Error(String),
 }
 
 // ==================== CLI Types ====================

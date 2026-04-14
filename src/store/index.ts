@@ -161,7 +161,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   
   togglePin: async (id) => {
     const updated = await invoke<Prompt>('toggle_pin_prompt', { id });
-    set(state => ({ prompts: state.prompts.map(p => p.id === id ? updated : p) }));
+    set(state => {
+      const updated_prompts = state.prompts.map(p => p.id === id ? updated : p);
+      // Re-sort: pinned first, then by sort_order asc, then updated_at desc
+      updated_prompts.sort((a, b) => {
+        if (a.is_pinned !== b.is_pinned) return a.is_pinned ? -1 : 1;
+        if (a.sort_order !== b.sort_order) return a.sort_order - b.sort_order;
+        return b.updated_at.localeCompare(a.updated_at);
+      });
+      return { prompts: updated_prompts };
+    });
   },
   
   duplicatePrompt: async (id) => {
@@ -232,6 +241,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         document.documentElement.classList.remove('dark');
       }
     }
+    // Persist to DB (fire-and-forget, don't block UI)
+    invoke('set_setting', { request: { key: 'theme', value: theme } }).catch(() => {});
   },
   
   setSelectedPrompt: (id) => set({ selectedPromptId: id }),

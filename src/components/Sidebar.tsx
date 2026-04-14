@@ -15,15 +15,19 @@ import {
   Sun,
   Monitor,
   Settings,
+  Upload,
+  Download,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 interface SidebarProps {
   onOpenSettings: () => void;
+  onExport: () => void;
+  onImport: () => void;
   width?: number;
 }
 
-export function Sidebar({ onOpenSettings, width = 256 }: SidebarProps) {
+export function Sidebar({ onOpenSettings, onExport, onImport, width = 256 }: SidebarProps) {
   const {
     collections,
     tags,
@@ -212,6 +216,28 @@ export function Sidebar({ onOpenSettings, width = 256 }: SidebarProps) {
 
       {/* Bottom actions */}
       <div className="p-3 border-t space-y-1">
+        <div className="flex gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="flex-1 justify-start gap-2 text-xs"
+            onClick={onImport}
+            title="Import prompts from JSON"
+          >
+            <Upload className="h-3.5 w-3.5" />
+            Import
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="flex-1 justify-start gap-2 text-xs"
+            onClick={onExport}
+            title="Export prompts to JSON"
+          >
+            <Download className="h-3.5 w-3.5" />
+            Export
+          </Button>
+        </div>
         <Button
           variant="ghost"
           className="w-full justify-start gap-2"

@@ -85,6 +85,8 @@ fn main() {
             commands::settings::set_setting,
             commands::settings::get_all_settings,
             commands::ai::run_prompt,
+            commands::ai::run_prompt_streaming,
+            commands::ai::run_conversation,
             commands::ai::stream_prompt,
             commands::ai::list_models,
             commands::ai::health_check,
